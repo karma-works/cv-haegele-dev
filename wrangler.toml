@@ -1,0 +1,30 @@
+name = "cv-haegele-dev"
+main = "src/worker.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+routes = [
+  { pattern = "cv.haegele.dev", custom_domain = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "recruiting-haegele-dev"
+database_id = "332a9525-1d29-44b9-9ead-2568e67acdc8"
+
+[ai]
+binding = "AI"
+
+[vars]
+APP_ORIGIN = "https://cv.haegele.dev"
+MODEL_NAME = "@cf/meta/llama-3.1-8b-instruct"
+KB_MAX_BYTES = "1048576"
+TOKEN_DAILY_LIMIT = "10"
+MOATSHIFT_DAILY_LIMIT = "100"
+CLERK_FRONTEND_API = ""
+CLERK_PUBLISHABLE_KEY = ""
+
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true

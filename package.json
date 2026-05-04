@@ -1,0 +1,19 @@
+{
+  "name": "cv-haegele-dev",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit",
+    "smoke": "node scripts/smoke-test.mjs",
+    "db:migrate:local": "wrangler d1 execute recruiting-haegele-dev --local --file=src/db/schema.sql",
+    "db:migrate:remote": "wrangler d1 execute recruiting-haegele-dev --remote --file=src/db/schema.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260418.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.86.0"
+  }
+}

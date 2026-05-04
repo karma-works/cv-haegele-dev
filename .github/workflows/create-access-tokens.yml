@@ -1,0 +1,80 @@
+name: Create access tokens
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Number of tokens to create
+        required: true
+        default: "5"
+      label:
+        description: Label prefix
+        required: true
+        default: invite
+      expires_days:
+        description: Days until expiry
+        required: true
+        default: "90"
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve D1 database
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! json="$(npx wrangler d1 list --json 2>/tmp/wrangler-d1-list.err)"; then
+            cat /tmp/wrangler-d1-list.err >&2
+            exit 1
+          fi
+          existing="$(printf '%s' "$json" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const dbs=JSON.parse(s || '[]'); const db=dbs.find(d=>d.name==='recruiting-haegele-dev'); if (db) console.log(db.uuid || db.id);})")"
+          if [ -z "$existing" ]; then
+            created="$(npx wrangler d1 create recruiting-haegele-dev)"
+            existing="$(printf '%s\n' "$created" | sed -n 's/.*database_id = \"\([^\"]*\)\".*/\1/p' | tail -1)"
+          fi
+          sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$existing/g" wrangler.toml
+          npx wrangler d1 execute recruiting-haegele-dev --remote --file=src/db/schema.sql
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Create tokens
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="${{ inputs.count }}"
+          label="${{ inputs.label }}"
+          expires_days="${{ inputs.expires_days }}"
+          now_ms="$(node -e 'console.log(Date.now())')"
+          expires_sql="$(node -e "console.log(Date.now() + Number(process.argv[1]) * 86400000)" "$expires_days")"
+          summary_file="$(mktemp)"
+          echo "## CV access tokens" >> "$summary_file"
+          echo "" >> "$summary_file"
+          for i in $(seq 1 "$count"); do
+            raw="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+            hash="$(printf '%s' "$raw" | sha256sum | awk '{print $1}')"
+            id="tok_$(openssl rand -hex 12)"
+            token_label="${label}-${i}"
+            sql="INSERT INTO cv_auth_tokens (id, token_hash, label, created_at, expires_at) VALUES ('$id', '$hash', '$token_label', $now_ms, $expires_sql);"
+            npx wrangler d1 execute recruiting-haegele-dev --remote --command "$sql"
+            echo "- https://cv.haegele.dev?token=$raw" >> "$summary_file"
+          done
+          cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

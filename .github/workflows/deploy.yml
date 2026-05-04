@@ -1,0 +1,94 @@
+name: Deploy to Cloudflare
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run check
+
+      - name: Validate Cloudflare credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "CLOUDFLARE_API_TOKEN is not set." >&2
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "CLOUDFLARE_ACCOUNT_ID is not set." >&2
+            exit 1
+          fi
+          status="$(curl -sS -o /tmp/cf-token-verify.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            https://api.cloudflare.com/client/v4/user/tokens/verify)"
+          if [ "$status" != "200" ]; then
+            cat /tmp/cf-token-verify.json >&2
+            exit 1
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Resolve D1 database
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! json="$(npx wrangler d1 list --json 2>/tmp/wrangler-d1-list.err)"; then
+            cat /tmp/wrangler-d1-list.err >&2
+            exit 1
+          fi
+          existing="$(printf '%s' "$json" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const dbs=JSON.parse(s || '[]'); const db=dbs.find(d=>d.name==='recruiting-haegele-dev'); if (db) console.log(db.uuid || db.id);})")"
+          if [ -z "$existing" ]; then
+            created="$(npx wrangler d1 create recruiting-haegele-dev)"
+            existing="$(printf '%s\n' "$created" | sed -n 's/.*database_id = \"\([^\"]*\)\".*/\1/p' | tail -1)"
+          fi
+          if [ -z "$existing" ]; then
+            echo "Could not resolve D1 database id" >&2
+            exit 1
+          fi
+          sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$existing/g" wrangler.toml
+          npx wrangler d1 execute recruiting-haegele-dev --remote --file=src/db/schema.sql
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Configure optional Clerk settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${CLERK_JWKS_URL:-}" ]; then
+            printf '%s' "$CLERK_JWKS_URL" | npx wrangler secret put CLERK_JWKS_URL
+          fi
+          node -e 'const fs=require("fs"); const p="wrangler.toml"; let s=fs.readFileSync(p,"utf8"); const set=(k,v)=>{ if(v) s=s.replace(new RegExp(`^${k} = .*`, "m"), `${k} = ${JSON.stringify(v)}`); }; set("CLERK_FRONTEND_API", process.env.CLERK_FRONTEND_API); set("CLERK_PUBLISHABLE_KEY", process.env.CLERK_PUBLISHABLE_KEY); fs.writeFileSync(p,s);'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLERK_JWKS_URL: ${{ secrets.CLERK_JWKS_URL }}
+          CLERK_FRONTEND_API: ${{ vars.CLERK_FRONTEND_API }}
+          CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+
+      - name: Deploy Worker
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
