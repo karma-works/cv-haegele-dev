@@ -554,7 +554,7 @@ async function handleProfileImport(request: Request, env: Env) {
 }
 
 async function summarizeWithAi(env: Env, instruction: string, content: string) {
-  const result = await env.AI.run(env.MODEL_NAME || "@cf/meta/llama-3.1-8b-instruct", {
+  const result = await env.AI.run(env.MODEL_NAME || "@cf/moonshotai/kimi-k2.6", {
     messages: [
       { role: "system", content: "You summarize fetched public company/application material. Be factual, concise, and do not invent details." },
       { role: "user", content: `${instruction}\n\n${content.slice(0, 24_000)}` },
@@ -600,7 +600,7 @@ function kbPrompt(files: KnowledgeFile[]) {
 }
 
 async function callAiJson(env: Env, system: string, user: string) {
-  const result = await env.AI.run(env.MODEL_NAME || "@cf/meta/llama-3.1-8b-instruct", {
+  const result = await env.AI.run(env.MODEL_NAME || "@cf/moonshotai/kimi-k2.6", {
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
@@ -617,7 +617,7 @@ async function callAiJson(env: Env, system: string, user: string) {
 }
 
 async function callAiMarkdown(env: Env, system: string, user: string) {
-  const result = await env.AI.run(env.MODEL_NAME || "@cf/meta/llama-3.1-8b-instruct", {
+  const result = await env.AI.run(env.MODEL_NAME || "@cf/moonshotai/kimi-k2.6", {
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
