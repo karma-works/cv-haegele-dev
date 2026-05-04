@@ -17,7 +17,7 @@ binding = "AI"
 
 [vars]
 APP_ORIGIN = "https://cv.haegele.dev"
-MODEL_NAME = "@cf/meta/llama-3.1-8b-instruct"
+MODEL_NAME = "@cf/moonshotai/kimi-k2.6"
 KB_MAX_BYTES = "1048576"
 TOKEN_DAILY_LIMIT = "10"
 MOATSHIFT_DAILY_LIMIT = "100"
