@@ -304,10 +304,35 @@ async function githubProfileMarkdown(username: string) {
   return lines.join("\n").trim();
 }
 
-type AiResult = { response?: unknown; usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } };
+type AiRaw = Record<string, unknown>;
 
-function extractTokens(result: AiResult): number {
-  return result.usage?.total_tokens || (result.usage?.prompt_tokens || 0) + (result.usage?.completion_tokens || 0);
+function extractText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") return "";
+  const r = result as AiRaw;
+  // Standard Workers AI: { response: "string" }
+  if (typeof r.response === "string") return r.response;
+  // Nested: { response: { content: "string" } }
+  if (r.response && typeof r.response === "object") {
+    const nested = r.response as AiRaw;
+    if (typeof nested.content === "string") return nested.content;
+    if (typeof nested.text === "string") return nested.text;
+  }
+  // OpenAI-compatible: { choices: [{ message: { content } }] }
+  if (Array.isArray(r.choices) && r.choices.length > 0) {
+    const choice = r.choices[0] as AiRaw;
+    if (choice.message && typeof choice.message === "object") {
+      const msg = choice.message as AiRaw;
+      if (typeof msg.content === "string") return msg.content;
+    }
+    if (typeof choice.text === "string") return choice.text;
+  }
+  return "";
+}
+
+function extractTokens(result: AiRaw): number {
+  const usage = result.usage as { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } | undefined;
+  return usage?.total_tokens || (usage?.prompt_tokens || 0) + (usage?.completion_tokens || 0);
 }
 
 async function summarizeWithAi(env: Env, instruction: string, content: string) {
@@ -316,10 +341,9 @@ async function summarizeWithAi(env: Env, instruction: string, content: string) {
       { role: "system", content: "You summarize fetched public company/application material. Be factual, concise, and do not invent details." },
       { role: "user", content: `${instruction}\n\n${content.slice(0, 24_000)}` },
     ],
-  })) as AiResult;
+  })) as AiRaw;
   await recordTokenUsage(env, extractTokens(result));
-  const text = typeof result === "object" && result && "response" in result ? String((result as { response?: unknown }).response || "") : String(result || "");
-  return text.trim() || content.slice(0, 1200);
+  return extractText(result).trim() || content.slice(0, 1200);
 }
 
 async function callAiJson(env: Env, system: string, user: string) {
@@ -328,9 +352,9 @@ async function callAiJson(env: Env, system: string, user: string) {
       { role: "system", content: system },
       { role: "user", content: user },
     ],
-  })) as AiResult;
+  })) as AiRaw;
   await recordTokenUsage(env, extractTokens(result));
-  const raw = typeof result === "object" && result && "response" in result ? String((result as { response?: unknown }).response || "") : String(result || "");
+  const raw = extractText(result);
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return { raw };
   try {
@@ -346,9 +370,9 @@ async function callAiMarkdown(env: Env, system: string, user: string) {
       { role: "system", content: system },
       { role: "user", content: user },
     ],
-  })) as AiResult;
+  })) as AiRaw;
   await recordTokenUsage(env, extractTokens(result));
-  return (typeof result === "object" && result && "response" in result ? String((result as { response?: unknown }).response || "") : String(result || "")).trim();
+  return extractText(result).trim();
 }
 
 function factualSystem() {
@@ -497,6 +521,20 @@ async function handleSaveClarifications(request: Request, env: Env) {
   return json({ saved, files: await listKnowledge(env, workspaceId) });
 }
 
+async function handleRefinePlan(request: Request, env: Env) {
+  const body = await readJson<{ workspaceId?: string; jdText?: string; localeStyle?: string; currentPlan?: string; instruction?: string }>(request);
+  const workspaceId = await workspaceFromBody(env, body);
+  const budget = await checkTokenBudget(env);
+  if (!budget.ok) return json({ error: "daily_budget_exceeded", ...budget }, { status: 429 });
+  const { files } = await generationContext(env, workspaceId);
+  const plan = await callAiMarkdown(
+    env,
+    `${factualSystem()} You are refining a CV tailoring plan based on user feedback. Apply the requested change and return the complete updated plan in Markdown. Keep the same structure: Emphasize, Reduce, Omit, Risk checks.`,
+    `CV style: ${body.localeStyle || "English/American"}\n\nJob description:\n${sanitizeUserText(body.jdText || "", 40_000)}\n\nKnowledge base:\n${kbPrompt(files).slice(0, 80_000)}\n\nCurrent plan:\n${sanitizeUserText(body.currentPlan || "", 10_000)}\n\nRequested change:\n${sanitizeUserText(body.instruction || "", 2000)}`
+  );
+  return json({ plan, budgetStatus: await checkTokenBudget(env) });
+}
+
 async function handleTailoringPlan(request: Request, env: Env) {
   const body = await readJson<{ workspaceId?: string; jdText?: string; localeStyle?: string }>(request);
   const workspaceId = await workspaceFromBody(env, body);
@@ -621,8 +659,18 @@ ${css()}
       <button id="planButton" class="secondary" disabled>Create tailoring plan</button>
       <button id="cvButton" disabled>Generate CV</button>
     </div>
+    <div id="analyzeLoading" class="loading" hidden>Analyzing gaps…</div>
     <div id="questions" class="questions"></div>
-    <div id="plan" class="output"></div>
+    <div id="planLoading" class="loading" hidden>Creating tailoring plan…</div>
+    <div id="planSection" hidden>
+      <textarea id="planTextarea" rows="18" class="planTextarea"></textarea>
+      <div class="refineRow">
+        <input id="refineInput" placeholder="Ask to change something in the plan…">
+        <button id="refineButton" class="secondary">Refine</button>
+      </div>
+      <div id="refineLoading" class="loading" hidden>Refining plan…</div>
+    </div>
+    <div id="cvLoading" class="loading" hidden>Generating CV…</div>
     <div id="cvOutput" class="output"></div>
   </section>
 
@@ -637,6 +685,7 @@ ${css()}
     <div class="actions">
       <button id="letterButton" class="secondary">Generate cover letter</button>
     </div>
+    <div id="letterLoading" class="loading" hidden>Generating cover letter…</div>
     <div id="letterOutput" class="output"></div>
   </section>
 </main>
@@ -690,6 +739,10 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .output.small { font-size: 14px; }
 .questions { display: grid; gap: 14px; margin-top: 16px; }
 .question { border-top: 1px solid var(--rule); padding-top: 14px; }
+.loading { margin-top: 16px; color: var(--ink-soft); font-size: 14px; font-style: italic; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+.planTextarea { width: 100%; margin-top: 16px; min-height: 260px; font-family: ui-monospace, monospace; font-size: 13px; line-height: 1.5; }
+.refineRow { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 10px; }
 .errorBar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--danger); color: #fff; text-align: center; padding: 12px; font-size: 14px; z-index: 100; }
 @media (max-width: 760px) {
   .masthead, .sectionHead, .grid.two { grid-template-columns: 1fr; display: grid; }
@@ -843,49 +896,83 @@ $("fetchCompany").onclick = async () => {
   const data = await api("/api/company-fetch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, url }) });
   $("companySummary").textContent = data.summary;
 };
+function showLoading(id) { const el = $(id); if (el) el.hidden = false; }
+function hideLoading(id) { const el = $(id); if (el) el.hidden = true; }
+
+function setPlan(text) {
+  $("planTextarea").value = text;
+  $("planSection").hidden = false;
+  $("cvButton").disabled = false;
+}
+
 $("analyzeButton").onclick = async () => {
-  const data = await api("/api/analyze-gaps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value }) });
-  const result = data.result || {};
-  state.questions = result.questions || [];
   $("questions").innerHTML = "";
-  if (!state.questions.length) {
-    $("questions").textContent = "No blocking high-impact questions. Create the tailoring plan next.";
-    $("planButton").disabled = false;
-    return;
-  }
-  state.questions.forEach((q, i) => {
-    const div = document.createElement("div");
-    div.className = "question";
-    div.innerHTML = "<label></label><textarea rows='3'></textarea>";
-    div.querySelector("label").textContent = q.question || ("Question " + (i + 1));
-    div.querySelector("textarea").dataset.question = q.question || "";
-    $("questions").appendChild(div);
-  });
-  const save = document.createElement("button");
-  save.textContent = "Save clarifications";
-  save.onclick = async () => {
-    const answers = Array.from($("questions").querySelectorAll("textarea")).map(t => ({ question: t.dataset.question, answer: t.value.trim() })).filter(a => a.answer);
-    await api("/api/clarifications", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, answers }) });
-    $("planButton").disabled = false;
-    await refreshFiles();
-  };
-  $("questions").appendChild(save);
+  showLoading("analyzeLoading");
+  try {
+    const data = await api("/api/analyze-gaps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value }) });
+    const result = data.result || {};
+    state.questions = result.questions || [];
+    $("questions").innerHTML = "";
+    if (!state.questions.length) {
+      $("questions").textContent = "No blocking high-impact questions. Create the tailoring plan next.";
+      $("planButton").disabled = false;
+      return;
+    }
+    state.questions.forEach((q, i) => {
+      const div = document.createElement("div");
+      div.className = "question";
+      div.innerHTML = "<label></label><textarea rows='3'></textarea>";
+      div.querySelector("label").textContent = q.question || ("Question " + (i + 1));
+      div.querySelector("textarea").dataset.question = q.question || "";
+      $("questions").appendChild(div);
+    });
+    const save = document.createElement("button");
+    save.textContent = "Save clarifications";
+    save.onclick = async () => {
+      const answers = Array.from($("questions").querySelectorAll("textarea")).map(t => ({ question: t.dataset.question, answer: t.value.trim() })).filter(a => a.answer);
+      await api("/api/clarifications", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, answers }) });
+      $("planButton").disabled = false;
+      await refreshFiles();
+    };
+    $("questions").appendChild(save);
+  } finally { hideLoading("analyzeLoading"); }
 };
 $("planButton").onclick = async () => {
-  const data = await api("/api/tailoring-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value }) });
-  state.tailoringPlan = data.plan;
-  $("plan").textContent = data.plan + "\\n\\nApprove this plan to generate the final CV.";
-  $("cvButton").disabled = false;
+  showLoading("planLoading");
+  try {
+    const data = await api("/api/tailoring-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value }) });
+    setPlan(data.plan || "");
+  } finally { hideLoading("planLoading"); }
+};
+$("refineButton").onclick = async () => {
+  const instruction = $("refineInput").value.trim();
+  if (!instruction) return;
+  showLoading("refineLoading");
+  try {
+    const data = await api("/api/refine-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value, currentPlan: $("planTextarea").value, instruction }) });
+    setPlan(data.plan || "");
+    $("refineInput").value = "";
+  } finally { hideLoading("refineLoading"); }
 };
 $("cvButton").onclick = async () => {
-  const data = await api("/api/generate-cv", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value, tailoringPlan: state.tailoringPlan }) });
-  $("cvOutput").textContent = data.cv;
-  download("tailored-cv.md", data.cv);
+  $("cvOutput").textContent = "";
+  showLoading("cvLoading");
+  try {
+    const data = await api("/api/generate-cv", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value, tailoringPlan: $("planTextarea").value }) });
+    const cv = typeof data.cv === "string" ? data.cv : JSON.stringify(data.cv);
+    $("cvOutput").textContent = cv;
+    download("tailored-cv.md", cv);
+  } finally { hideLoading("cvLoading"); }
 };
 $("letterButton").onclick = async () => {
-  const data = await api("/api/generate-cover-letter", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, style: $("letterStyle").value }) });
-  $("letterOutput").textContent = data.letter;
-  download("cover-letter.md", data.letter);
+  $("letterOutput").textContent = "";
+  showLoading("letterLoading");
+  try {
+    const data = await api("/api/generate-cover-letter", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, style: $("letterStyle").value }) });
+    const letter = typeof data.letter === "string" ? data.letter : JSON.stringify(data.letter);
+    $("letterOutput").textContent = letter;
+    download("cover-letter.md", letter);
+  } finally { hideLoading("letterLoading"); }
 };
 refreshStatus();
 refreshFiles();
@@ -909,6 +996,7 @@ async function router(request: Request, env: Env) {
   if (url.pathname === "/api/analyze-gaps" && request.method === "POST") return handleAnalyzeGaps(request, env);
   if (url.pathname === "/api/clarifications" && request.method === "POST") return handleSaveClarifications(request, env);
   if (url.pathname === "/api/tailoring-plan" && request.method === "POST") return handleTailoringPlan(request, env);
+  if (url.pathname === "/api/refine-plan" && request.method === "POST") return handleRefinePlan(request, env);
   if (url.pathname === "/api/generate-cv" && request.method === "POST") return handleGenerateCv(request, env);
   if (url.pathname === "/api/generate-cover-letter" && request.method === "POST") return handleGenerateCoverLetter(request, env);
   if (url.pathname === "/llms.txt") {
