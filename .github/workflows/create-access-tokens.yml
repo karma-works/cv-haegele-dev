@@ -36,7 +36,7 @@ jobs:
           summary_file="$(mktemp)"
           echo "## CV access tokens" >> "$summary_file"
           echo "" >> "$summary_file"
-          node <<'NODE' "$count" "$safe_label" "$expires_days" "$ADMIN_TOKEN" "$summary_file"
+          node - "$count" "$safe_label" "$expires_days" "$ADMIN_TOKEN" "$summary_file" <<'NODE'
           const crypto = require('crypto');
           const [countRaw, label, daysRaw, secret, summaryFile] = process.argv.slice(2);
           const count = Math.min(Math.max(Number(countRaw || 1), 1), 50);
