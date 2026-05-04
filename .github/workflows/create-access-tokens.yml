@@ -37,7 +37,7 @@ jobs:
           echo "## CV access tokens" >> "$summary_file"
           echo "" >> "$summary_file"
           response="$(curl -fsS -X POST https://cv.haegele.dev/api/admin/create-tokens \
-            -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+            -H "x-admin-token: ${ADMIN_TOKEN}" \
             -H "Content-Type: application/json" \
             --data "{\"count\":${count},\"label\":\"${safe_label}\",\"expiresDays\":${expires_days}}")"
           printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const data=JSON.parse(s); for (const url of data.urls || []) console.log('- ' + url);})" >> "$summary_file"

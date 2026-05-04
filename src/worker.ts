@@ -174,7 +174,8 @@ async function requireSession(request: Request, env: Env): Promise<Session | nul
 function requireAdmin(request: Request, env: Env) {
   const header = request.headers.get("authorization") || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
-  return Boolean(env.ADMIN_TOKEN && match && match[1] === env.ADMIN_TOKEN);
+  const adminHeader = request.headers.get("x-admin-token") || "";
+  return Boolean(env.ADMIN_TOKEN && ((match && match[1] === env.ADMIN_TOKEN) || adminHeader === env.ADMIN_TOKEN));
 }
 
 function dailyLimit(env: Env, accessType: AccessType) {
