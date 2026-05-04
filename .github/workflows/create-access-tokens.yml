@@ -34,11 +34,12 @@ jobs:
           expires_days="${{ inputs.expires_days }}"
           safe_label="$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '-')"
           summary_file="$(mktemp)"
+          token_file="tokens.txt"
           echo "## CV access tokens" >> "$summary_file"
           echo "" >> "$summary_file"
-          node - "$count" "$safe_label" "$expires_days" "$ADMIN_TOKEN" "$summary_file" <<'NODE'
+          node - "$count" "$safe_label" "$expires_days" "$ADMIN_TOKEN" "$summary_file" "$token_file" <<'NODE'
           const crypto = require('crypto');
-          const [countRaw, label, daysRaw, secret, summaryFile] = process.argv.slice(2);
+          const [countRaw, label, daysRaw, secret, summaryFile, tokenFile] = process.argv.slice(2);
           const count = Math.min(Math.max(Number(countRaw || 1), 1), 50);
           const expiresAt = Date.now() + Number(daysRaw || 90) * 86400000;
           const lines = [];
@@ -55,8 +56,16 @@ jobs:
             lines.push(`- https://cv.haegele.dev?token=${payload}.${sig}`);
           }
           require('fs').appendFileSync(summaryFile, lines.join('\n') + '\n');
+          require('fs').writeFileSync(tokenFile, lines.join('\n') + '\n');
           console.log(lines.join('\n'));
           NODE
           cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+
+      - name: Upload token artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cv-access-tokens
+          path: tokens.txt
+          retention-days: 1
