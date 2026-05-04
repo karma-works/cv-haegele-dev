@@ -35,6 +35,19 @@ function json(data: unknown, init: ResponseInit = {}) {
   });
 }
 
+function sseHeaders(init: ResponseInit = {}) {
+  return {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-store, no-transform",
+    ...init.headers,
+  };
+}
+
+function sse(event: string, data: unknown) {
+  const payload = JSON.stringify(data);
+  return `event: ${event}\ndata: ${payload.replace(/\n/g, "\ndata: ")}\n\n`;
+}
+
 function html(content: string, init: ResponseInit = {}) {
   return new Response(content, {
     ...init,
@@ -306,6 +319,10 @@ async function githubProfileMarkdown(username: string) {
 
 type AiRaw = Record<string, unknown>;
 
+function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
+  return !!value && typeof value === "object" && typeof (value as { getReader?: unknown }).getReader === "function";
+}
+
 function extractText(result: unknown): string {
   if (typeof result === "string") return result;
   if (!result || typeof result !== "object") return "";
@@ -324,6 +341,31 @@ function extractText(result: unknown): string {
     if (choice.message && typeof choice.message === "object") {
       const msg = choice.message as AiRaw;
       if (typeof msg.content === "string") return msg.content;
+    }
+    if (typeof choice.text === "string") return choice.text;
+  }
+  return "";
+}
+
+function extractStreamText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") return "";
+  const r = result as AiRaw;
+  if (typeof r.response === "string") return r.response;
+  if (typeof r.content === "string") return r.content;
+  if (typeof r.text === "string") return r.text;
+  if (typeof r.delta === "string") return r.delta;
+  if (r.delta && typeof r.delta === "object") {
+    const delta = r.delta as AiRaw;
+    if (typeof delta.content === "string") return delta.content;
+    if (typeof delta.text === "string") return delta.text;
+  }
+  if (Array.isArray(r.choices) && r.choices.length > 0) {
+    const choice = r.choices[0] as AiRaw;
+    if (choice.delta && typeof choice.delta === "object") {
+      const delta = choice.delta as AiRaw;
+      if (typeof delta.content === "string") return delta.content;
+      if (typeof delta.text === "string") return delta.text;
     }
     if (typeof choice.text === "string") return choice.text;
   }
@@ -373,6 +415,95 @@ async function callAiMarkdown(env: Env, system: string, user: string) {
   })) as AiRaw;
   await recordTokenUsage(env, extractTokens(result));
   return extractText(result).trim();
+}
+
+function streamAiMarkdown(env: Env, system: string, user: string) {
+  const model = env.MODEL_NAME || "@cf/moonshotai/kimi-k2.6";
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const write = (event: string, data: unknown) => controller.enqueue(encoder.encode(sse(event, data)));
+      let output = "";
+      let usageTokens = 0;
+      try {
+        write("ready", {});
+        const result = await env.AI.run(model, {
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          stream: true,
+        });
+
+        if (!isReadableStream(result)) {
+          const text = extractText(result).trim();
+          output += text;
+          usageTokens = extractTokens(result as AiRaw);
+          if (text) write("token", text);
+        } else {
+          const reader = result.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop() || "";
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith(":")) continue;
+              if (trimmed.startsWith("event:")) continue;
+              const raw = trimmed.startsWith("data:") ? trimmed.slice(5).trimStart() : trimmed;
+              if (!raw || raw === "[DONE]") continue;
+              try {
+                const parsed = JSON.parse(raw) as AiRaw;
+                usageTokens ||= extractTokens(parsed);
+                const token = extractStreamText(parsed);
+                if (token) {
+                  output += token;
+                  write("token", token);
+                }
+              } catch {
+                output += raw;
+                write("token", raw);
+              }
+            }
+          }
+
+          const tail = buffer.trim();
+          if (tail && tail !== "data: [DONE]" && tail !== "[DONE]") {
+            const raw = tail.startsWith("data:") ? tail.slice(5).trimStart() : tail;
+            if (raw && raw !== "[DONE]") {
+              try {
+                const parsed = JSON.parse(raw) as AiRaw;
+                usageTokens ||= extractTokens(parsed);
+                const token = extractStreamText(parsed);
+                if (token) {
+                  output += token;
+                  write("token", token);
+                }
+              } catch {
+                output += raw;
+                write("token", raw);
+              }
+            }
+          }
+        }
+
+        if (!usageTokens) usageTokens = Math.ceil((system.length + user.length + output.length) / 4);
+        await recordTokenUsage(env, usageTokens);
+        write("budget", await checkTokenBudget(env));
+        write("done", { text: output.trim() });
+      } catch (error) {
+        write("error", { message: error instanceof Error ? error.message : String(error) });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, { headers: sseHeaders() });
 }
 
 function factualSystem() {
@@ -527,12 +658,11 @@ async function handleRefinePlan(request: Request, env: Env) {
   const budget = await checkTokenBudget(env);
   if (!budget.ok) return json({ error: "daily_budget_exceeded", ...budget }, { status: 429 });
   const { files } = await generationContext(env, workspaceId);
-  const plan = await callAiMarkdown(
+  return streamAiMarkdown(
     env,
     `${factualSystem()} You are refining a CV tailoring plan based on user feedback. Apply the requested change and return the complete updated plan in Markdown. Keep the same structure: Emphasize, Reduce, Omit, Risk checks.`,
     `CV style: ${body.localeStyle || "English/American"}\n\nJob description:\n${sanitizeUserText(body.jdText || "", 40_000)}\n\nKnowledge base:\n${kbPrompt(files).slice(0, 80_000)}\n\nCurrent plan:\n${sanitizeUserText(body.currentPlan || "", 10_000)}\n\nRequested change:\n${sanitizeUserText(body.instruction || "", 2000)}`
   );
-  return json({ plan, budgetStatus: await checkTokenBudget(env) });
 }
 
 async function handleTailoringPlan(request: Request, env: Env) {
@@ -541,12 +671,11 @@ async function handleTailoringPlan(request: Request, env: Env) {
   const budget = await checkTokenBudget(env);
   if (!budget.ok) return json({ error: "daily_budget_exceeded", ...budget }, { status: 429 });
   const { files } = await generationContext(env, workspaceId);
-  const plan = await callAiMarkdown(
+  return streamAiMarkdown(
     env,
     `${factualSystem()} Create a concise Markdown tailoring plan. Sections: Emphasize, Reduce, Omit, Risk checks. Do not write the CV yet.`,
     `CV style: ${body.localeStyle || "English/American"}\n\nJob description:\n${sanitizeUserText(body.jdText || "", 40_000)}\n\nKnowledge base:\n${kbPrompt(files).slice(0, 120_000)}`
   );
-  return json({ plan, budgetStatus: await checkTokenBudget(env) });
 }
 
 async function handleGenerateCv(request: Request, env: Env) {
@@ -556,12 +685,11 @@ async function handleGenerateCv(request: Request, env: Env) {
   if (!budget.ok) return json({ error: "daily_budget_exceeded", ...budget }, { status: 429 });
   const { files } = await generationContext(env, workspaceId);
   const locale = body.localeStyle || "English/American";
-  const cv = await callAiMarkdown(
+  return streamAiMarkdown(
     env,
     `${factualSystem()} Generate a final Markdown CV. ${locale === "German" ? "Use German CV conventions and German language." : "Use concise English/American resume conventions and English language."} Include public project links where relevant. Do not include citations or AI disclosure. Do not include placeholders or gaps.`,
     `Approved tailoring plan:\n${sanitizeUserText(body.tailoringPlan || "", 20_000)}\n\nJob description:\n${sanitizeUserText(body.jdText || "", 40_000)}\n\nKnowledge base:\n${kbPrompt(files).slice(0, 120_000)}`
   );
-  return json({ cv, budgetStatus: await checkTokenBudget(env) });
 }
 
 async function handleGenerateCoverLetter(request: Request, env: Env) {
@@ -570,12 +698,11 @@ async function handleGenerateCoverLetter(request: Request, env: Env) {
   const budget = await checkTokenBudget(env);
   if (!budget.ok) return json({ error: "daily_budget_exceeded", ...budget }, { status: 429 });
   const { files, companies } = await generationContext(env, workspaceId);
-  const letter = await callAiMarkdown(
+  return streamAiMarkdown(
     env,
     `${factualSystem()} Generate one Markdown cover letter in the user's requested style. Use company notes only when they are provided. Do not include citations or AI disclosure. Keep it specific, factual, and not exaggerated.`,
     `Requested style/tone:\n${sanitizeUserText(body.style || "direct and concise", 2000)}\n\nJob description:\n${sanitizeUserText(body.jdText || "", 40_000)}\n\nFetched company notes:\n${companies.map((c) => `Source: ${c.url}\n${c.summary}`).join("\n\n") || "[none]"}\n\nKnowledge base:\n${kbPrompt(files).slice(0, 120_000)}`
   );
-  return json({ letter, budgetStatus: await checkTokenBudget(env) });
 }
 
 function appHtml() {
@@ -585,6 +712,10 @@ function appHtml() {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CV tailoring workspace</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.48.4/codemirror.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tui-editor/1.4.10/tui-editor.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tui-editor/1.4.10/tui-editor-contents.css">
 <style>
 ${css()}
 </style>
@@ -661,6 +792,7 @@ ${css()}
     </div>
     <div id="analyzeLoading" class="loading" hidden>Analyzing gaps…</div>
     <div id="questions" class="questions"></div>
+    <div id="clarificationsPreview" class="markdownViewer" hidden></div>
     <div id="planLoading" class="loading" hidden>Creating tailoring plan…</div>
     <div id="planSection" hidden>
       <textarea id="planTextarea" rows="18" class="planTextarea"></textarea>
@@ -671,7 +803,7 @@ ${css()}
       <div id="refineLoading" class="loading" hidden>Refining plan…</div>
     </div>
     <div id="cvLoading" class="loading" hidden>Generating CV…</div>
-    <div id="cvOutput" class="output"></div>
+    <div id="cvOutput" class="markdownViewer" hidden></div>
   </section>
 
   <section class="panel">
@@ -686,9 +818,10 @@ ${css()}
       <button id="letterButton" class="secondary">Generate cover letter</button>
     </div>
     <div id="letterLoading" class="loading" hidden>Generating cover letter…</div>
-    <div id="letterOutput" class="output"></div>
+    <div id="letterOutput" class="markdownViewer" hidden></div>
   </section>
 </main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tui-editor/1.4.10/tui-editor-Editor-full.min.js"></script>
 <script>
 ${clientJs()}
 </script>
@@ -737,6 +870,15 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .output { white-space: pre-wrap; border-top: 1px solid var(--rule); margin-top: 16px; padding-top: 16px; line-height: 1.5; }
 .output:empty { display: none; }
 .output.small { font-size: 14px; }
+.markdownViewer { border-top: 1px solid var(--rule); margin-top: 16px; padding-top: 16px; }
+.markdownViewer[hidden] { display: none; }
+.markdownViewer .tui-editor-contents { font-family: Georgia, "Noto Serif", serif; color: var(--ink); font-size: 15px; line-height: 1.55; }
+.markdownViewer .tui-editor-contents h1,
+.markdownViewer .tui-editor-contents h2,
+.markdownViewer .tui-editor-contents h3,
+.markdownViewer .tui-editor-contents h4 { color: var(--ink); font-weight: 500; border-bottom-color: var(--rule); }
+.markdownViewer .tui-editor-contents code,
+.markdownViewer .tui-editor-contents pre { font-family: ui-monospace, monospace; }
 .questions { display: grid; gap: 14px; margin-top: 16px; }
 .question { border-top: 1px solid var(--rule); padding-top: 14px; }
 .loading { margin-top: 16px; color: var(--ink-soft); font-size: 14px; font-style: italic; animation: pulse 1.4s ease-in-out infinite; }
@@ -768,6 +910,8 @@ const $ = (id) => document.getElementById(id);
 const AI_BUTTONS = ["analyzeButton", "planButton", "cvButton", "letterButton", "fetchCompany", "importProfile", "uploadButton", "deleteAllButton"];
 let busyCount = 0;
 let lastBudget = null;
+const markdownViewers = {};
+const pendingMarkdownUpdates = {};
 
 function updateStatusBar() {
   const isBusy = busyCount > 0;
@@ -822,6 +966,67 @@ function download(name, text) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+function markdownViewer(id, height = "auto") {
+  if (markdownViewers[id]) return markdownViewers[id];
+  const el = $(id);
+  if (!el || !window.tui || !tui.Editor) return null;
+  markdownViewers[id] = tui.Editor.factory({
+    el,
+    viewer: true,
+    height,
+    initialValue: "",
+    usageStatistics: false
+  });
+  return markdownViewers[id];
+}
+
+function setMarkdownViewer(id, markdown) {
+  const el = $(id);
+  if (!el) return;
+  const text = markdown || "";
+  el.hidden = !text.trim();
+  const viewer = markdownViewer(id);
+  if (!viewer) {
+    el.textContent = text;
+    return;
+  }
+  if (typeof viewer.setMarkdown === "function") viewer.setMarkdown(text);
+  else if (typeof viewer.setValue === "function") viewer.setValue(text, false);
+  else {
+    viewer.destroy && viewer.destroy();
+    delete markdownViewers[id];
+    el.innerHTML = "";
+    markdownViewer(id);
+  }
+}
+
+function scheduleMarkdownViewer(id, markdown) {
+  pendingMarkdownUpdates[id] = markdown;
+  if (pendingMarkdownUpdates[id + "_scheduled"]) return;
+  pendingMarkdownUpdates[id + "_scheduled"] = true;
+  requestAnimationFrame(() => {
+    pendingMarkdownUpdates[id + "_scheduled"] = false;
+    setMarkdownViewer(id, pendingMarkdownUpdates[id] || "");
+  });
+}
+
+function clarificationsMarkdown() {
+  const answers = Array.from($("questions").querySelectorAll("textarea"))
+    .map((t, i) => ({ question: t.dataset.question || ("Question " + (i + 1)), answer: t.value.trim() }))
+    .filter((item) => item.question || item.answer);
+  if (!answers.length) return "";
+  return ["# Clarifications", "", ...answers.flatMap((item, index) => [
+    "## Question " + (index + 1),
+    "",
+    item.question,
+    "",
+    "Answer:",
+    "",
+    item.answer || "_Not answered yet_",
+    ""
+  ])].join("\\n");
+}
+
 async function api(path, opts = {}) {
   setBusy(1);
   try {
@@ -830,6 +1035,61 @@ async function api(path, opts = {}) {
     if (!res.ok) throw new Error(data.message || data.error || "request_failed");
     if (data.budgetStatus) { lastBudget = data.budgetStatus; updateStatusBar(); }
     return data;
+  } catch (err) {
+    showError(err.message || String(err));
+    throw err;
+  } finally {
+    setBusy(-1);
+  }
+}
+
+async function streamApi(path, opts = {}, onToken = () => {}) {
+  setBusy(1);
+  let finalText = "";
+  try {
+    const res = await fetch(path, opts);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.message || data.error || "request_failed");
+    }
+    if (!res.body) throw new Error("stream_unavailable");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    function handleBlock(block) {
+      if (!block.trim()) return;
+      let event = "message";
+      const dataLines = [];
+      for (const line of block.split(/\\r?\\n/)) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      const raw = dataLines.join("\\n");
+      const data = raw ? JSON.parse(raw) : {};
+      if (event === "token") {
+        finalText += String(data);
+        onToken(String(data), finalText);
+      } else if (event === "budget") {
+        lastBudget = data;
+        updateStatusBar();
+      } else if (event === "done") {
+        if (typeof data.text === "string") finalText = data.text;
+      } else if (event === "error") {
+        throw new Error(data.message || "stream_failed");
+      }
+    }
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\\n\\n/);
+      buffer = blocks.pop() || "";
+      for (const block of blocks) handleBlock(block);
+    }
+    if (buffer.trim()) handleBlock(buffer);
+    return finalText;
   } catch (err) {
     showError(err.message || String(err));
     throw err;
@@ -913,6 +1173,7 @@ $("analyzeButton").onclick = async () => {
     const result = data.result || {};
     state.questions = result.questions || [];
     $("questions").innerHTML = "";
+    setMarkdownViewer("clarificationsPreview", "");
     if (!state.questions.length) {
       $("questions").textContent = "No blocking high-impact questions. Create the tailoring plan next.";
       $("planButton").disabled = false;
@@ -924,13 +1185,16 @@ $("analyzeButton").onclick = async () => {
       div.innerHTML = "<label></label><textarea rows='3'></textarea>";
       div.querySelector("label").textContent = q.question || ("Question " + (i + 1));
       div.querySelector("textarea").dataset.question = q.question || "";
+      div.querySelector("textarea").addEventListener("input", () => scheduleMarkdownViewer("clarificationsPreview", clarificationsMarkdown()));
       $("questions").appendChild(div);
     });
+    setMarkdownViewer("clarificationsPreview", clarificationsMarkdown());
     const save = document.createElement("button");
     save.textContent = "Save clarifications";
     save.onclick = async () => {
       const answers = Array.from($("questions").querySelectorAll("textarea")).map(t => ({ question: t.dataset.question, answer: t.value.trim() })).filter(a => a.answer);
       await api("/api/clarifications", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, answers }) });
+      setMarkdownViewer("clarificationsPreview", clarificationsMarkdown());
       $("planButton").disabled = false;
       await refreshFiles();
     };
@@ -940,8 +1204,11 @@ $("analyzeButton").onclick = async () => {
 $("planButton").onclick = async () => {
   showLoading("planLoading");
   try {
-    const data = await api("/api/tailoring-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value }) });
-    setPlan(data.plan || "");
+    setPlan("");
+    const plan = await streamApi("/api/tailoring-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value }) }, (_token, text) => {
+      $("planTextarea").value = text;
+    });
+    setPlan(plan);
   } finally { hideLoading("planLoading"); }
 };
 $("refineButton").onclick = async () => {
@@ -949,28 +1216,34 @@ $("refineButton").onclick = async () => {
   if (!instruction) return;
   showLoading("refineLoading");
   try {
-    const data = await api("/api/refine-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value, currentPlan: $("planTextarea").value, instruction }) });
-    setPlan(data.plan || "");
+    const currentPlan = $("planTextarea").value;
+    $("planTextarea").value = "";
+    const plan = await streamApi("/api/refine-plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value, currentPlan, instruction }) }, (_token, text) => {
+      $("planTextarea").value = text;
+    });
+    setPlan(plan);
     $("refineInput").value = "";
   } finally { hideLoading("refineLoading"); }
 };
 $("cvButton").onclick = async () => {
-  $("cvOutput").textContent = "";
+  setMarkdownViewer("cvOutput", "");
   showLoading("cvLoading");
   try {
-    const data = await api("/api/generate-cv", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value, tailoringPlan: $("planTextarea").value }) });
-    const cv = typeof data.cv === "string" ? data.cv : JSON.stringify(data.cv);
-    $("cvOutput").textContent = cv;
+    const cv = await streamApi("/api/generate-cv", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, localeStyle: $("localeStyle").value, tailoringPlan: $("planTextarea").value }) }, (_token, text) => {
+      scheduleMarkdownViewer("cvOutput", text);
+    });
+    setMarkdownViewer("cvOutput", cv);
     download("tailored-cv.md", cv);
   } finally { hideLoading("cvLoading"); }
 };
 $("letterButton").onclick = async () => {
-  $("letterOutput").textContent = "";
+  setMarkdownViewer("letterOutput", "");
   showLoading("letterLoading");
   try {
-    const data = await api("/api/generate-cover-letter", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, style: $("letterStyle").value }) });
-    const letter = typeof data.letter === "string" ? data.letter : JSON.stringify(data.letter);
-    $("letterOutput").textContent = letter;
+    const letter = await streamApi("/api/generate-cover-letter", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: state.workspaceId, jdText: $("jdText").value, style: $("letterStyle").value }) }, (_token, text) => {
+      scheduleMarkdownViewer("letterOutput", text);
+    });
+    setMarkdownViewer("letterOutput", letter);
     download("cover-letter.md", letter);
   } finally { hideLoading("letterLoading"); }
 };
