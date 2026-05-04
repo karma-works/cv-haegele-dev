@@ -37,6 +37,7 @@ jobs:
           echo "## CV access tokens" >> "$summary_file"
           echo "" >> "$summary_file"
           response="$(curl -fsS -X POST https://cv.haegele.dev/api/admin/create-tokens \
+            -A "cv-haegele-dev-github-actions" \
             -H "x-admin-token: ${ADMIN_TOKEN}" \
             -H "Content-Type: application/json" \
             --data "{\"count\":${count},\"label\":\"${safe_label}\",\"expiresDays\":${expires_days}}")"

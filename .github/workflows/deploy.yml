@@ -82,7 +82,9 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS -X POST https://cv.haegele.dev/api/admin/apply-schema \
+            -A "cv-haegele-dev-github-actions" \
             -H "x-admin-token: ${ADMIN_TOKEN}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json" \
+            --data '{}'
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
