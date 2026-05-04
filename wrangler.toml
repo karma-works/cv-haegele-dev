@@ -19,10 +19,7 @@ binding = "AI"
 APP_ORIGIN = "https://cv.haegele.dev"
 MODEL_NAME = "@cf/moonshotai/kimi-k2.6"
 KB_MAX_BYTES = "1048576"
-TOKEN_DAILY_LIMIT = "10"
-MOATSHIFT_DAILY_LIMIT = "100"
-CLERK_FRONTEND_API = ""
-CLERK_PUBLISHABLE_KEY = ""
+DAILY_TOKEN_BUDGET = "500000"
 
 [[rules]]
 type = "Text"
