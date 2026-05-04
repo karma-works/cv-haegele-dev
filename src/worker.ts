@@ -9,6 +9,7 @@ interface Env {
   CLERK_FRONTEND_API?: string;
   CLERK_PUBLISHABLE_KEY?: string;
   CLERK_JWKS_URL?: string;
+  ADMIN_TOKEN?: string;
 }
 
 type AccessType = "token" | "moatshift";
@@ -170,6 +171,12 @@ async function requireSession(request: Request, env: Env): Promise<Session | nul
   return session;
 }
 
+function requireAdmin(request: Request, env: Env) {
+  const header = request.headers.get("authorization") || "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return Boolean(env.ADMIN_TOKEN && match && match[1] === env.ADMIN_TOKEN);
+}
+
 function dailyLimit(env: Env, accessType: AccessType) {
   return Number(accessType === "moatshift" ? env.MOATSHIFT_DAILY_LIMIT || 100 : env.TOKEN_DAILY_LIMIT || 10);
 }
@@ -290,6 +297,50 @@ async function handleAuthToken(request: Request, env: Env) {
   const session = await authWithToken(rawToken, env);
   if (!session) return json({ error: "invalid_token" }, { status: 401 });
   return json(session);
+}
+
+function schemaStatements() {
+  return [
+    "CREATE TABLE IF NOT EXISTS cv_auth_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, label TEXT, created_at INTEGER NOT NULL, expires_at INTEGER, revoked_at INTEGER, last_used_at INTEGER, use_count INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS cv_sessions (id TEXT PRIMARY KEY, access_type TEXT NOT NULL CHECK (access_type IN ('token', 'moatshift')), subject_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS cv_rate_limits (subject_id TEXT NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (subject_id, day))",
+    "CREATE TABLE IF NOT EXISTS cv_workspaces (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS cv_knowledge_files (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES cv_workspaces(id) ON DELETE CASCADE, filename TEXT NOT NULL, content TEXT NOT NULL, source_type TEXT NOT NULL CHECK (source_type IN ('upload', 'github', 'linkedin', 'xing', 'x', 'company', 'clarification')), source_url TEXT, content_bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS cv_company_sources (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES cv_workspaces(id) ON DELETE CASCADE, url TEXT NOT NULL, title TEXT, content TEXT NOT NULL, summary TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS idx_cv_auth_tokens_hash ON cv_auth_tokens(token_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_cv_sessions_subject ON cv_sessions(subject_id, expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_cv_knowledge_workspace ON cv_knowledge_files(workspace_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_cv_knowledge_expires ON cv_knowledge_files(expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_cv_company_workspace ON cv_company_sources(workspace_id, created_at)",
+  ];
+}
+
+async function handleAdminApplySchema(request: Request, env: Env) {
+  if (!requireAdmin(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  await env.DB.batch(schemaStatements().map((statement) => env.DB.prepare(statement)));
+  return json({ ok: true, statements: schemaStatements().length });
+}
+
+async function handleAdminCreateTokens(request: Request, env: Env) {
+  if (!requireAdmin(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const body = await readJson<{ count?: number; label?: string; expiresDays?: number }>(request);
+  const count = Math.min(Math.max(Number(body.count || 1), 1), 50);
+  const label = String(body.label || "invite").replace(/[^a-z0-9._-]/gi, "-").slice(0, 60);
+  const expiresDays = Math.min(Math.max(Number(body.expiresDays || 90), 1), 365);
+  const now = Date.now();
+  const expiresAt = now + expiresDays * 86_400_000;
+  const tokens: string[] = [];
+  const statements: D1PreparedStatement[] = [];
+  for (let i = 1; i <= count; i += 1) {
+    const raw = randomId("cv").replace(/^cv_/, "");
+    tokens.push(raw);
+    statements.push(
+      env.DB.prepare("INSERT INTO cv_auth_tokens (id, token_hash, label, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(randomId("tok"), await sha256(raw), `${label}-${i}`, now, expiresAt)
+    );
+  }
+  await env.DB.batch(statements);
+  return json({ ok: true, expiresAt, urls: tokens.map((token) => `${env.APP_ORIGIN || "https://cv.haegele.dev"}?token=${token}`) });
 }
 
 function base64UrlDecode(value: string) {
@@ -1009,6 +1060,8 @@ async function router(request: Request, env: Env) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   if (url.pathname === "/") return html(appHtml(env));
   if (url.pathname === "/api/health") return json({ ok: true });
+  if (url.pathname === "/api/admin/apply-schema" && request.method === "POST") return handleAdminApplySchema(request, env);
+  if (url.pathname === "/api/admin/create-tokens" && request.method === "POST") return handleAdminCreateTokens(request, env);
   if (url.pathname === "/api/auth/token" && request.method === "POST") return handleAuthToken(request, env);
   if (url.pathname === "/api/auth/moatshift" && request.method === "POST") return handleAuthMoatshift(request, env);
   if (url.pathname === "/api/me") return handleMe(request, env);
