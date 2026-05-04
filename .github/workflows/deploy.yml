@@ -76,15 +76,3 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      - name: Apply D1 schema through Worker binding
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsS -X POST https://cv.haegele.dev/api/admin/apply-schema \
-            -A "cv-haegele-dev-github-actions" \
-            -H "x-admin-token: ${ADMIN_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data '{}'
-        env:
-          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}

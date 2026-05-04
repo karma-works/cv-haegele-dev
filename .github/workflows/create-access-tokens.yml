@@ -36,12 +36,27 @@ jobs:
           summary_file="$(mktemp)"
           echo "## CV access tokens" >> "$summary_file"
           echo "" >> "$summary_file"
-          response="$(curl -fsS -X POST https://cv.haegele.dev/api/admin/create-tokens \
-            -A "cv-haegele-dev-github-actions" \
-            -H "x-admin-token: ${ADMIN_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data "{\"count\":${count},\"label\":\"${safe_label}\",\"expiresDays\":${expires_days}}")"
-          printf '%s' "$response" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const data=JSON.parse(s); for (const url of data.urls || []) console.log('- ' + url);})" >> "$summary_file"
+          node <<'NODE' "$count" "$safe_label" "$expires_days" "$ADMIN_TOKEN" "$summary_file"
+          const crypto = require('crypto');
+          const [countRaw, label, daysRaw, secret, summaryFile] = process.argv.slice(2);
+          const count = Math.min(Math.max(Number(countRaw || 1), 1), 50);
+          const expiresAt = Date.now() + Number(daysRaw || 90) * 86400000;
+          const lines = [];
+          const b64 = (value) => Buffer.from(value).toString('base64url');
+          for (let i = 1; i <= count; i += 1) {
+            const payload = b64(JSON.stringify({
+              typ: 'cv_invite',
+              label: `${label}-${i}`,
+              iat: Date.now(),
+              exp: expiresAt,
+              jti: crypto.randomBytes(18).toString('base64url')
+            }));
+            const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+            lines.push(`- https://cv.haegele.dev?token=${payload}.${sig}`);
+          }
+          require('fs').appendFileSync(summaryFile, lines.join('\n') + '\n');
+          console.log(lines.join('\n'));
+          NODE
           cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}

@@ -156,6 +156,29 @@ async function authWithToken(rawToken: string, env: Env) {
   return createSession(env, "token", token.id);
 }
 
+async function verifySignedInviteToken(rawToken: string, env: Env) {
+  const secret = env.ADMIN_TOKEN;
+  if (!secret) return null;
+  const parts = rawToken.split(".");
+  if (parts.length !== 2) return null;
+  const [payloadRaw, signatureRaw] = parts;
+  let payload: { typ?: string; exp?: number; label?: string; jti?: string };
+  try {
+    payload = JSON.parse(decoder.decode(base64UrlDecode(payloadRaw)));
+  } catch {
+    return null;
+  }
+  if (payload.typ !== "cv_invite" || !payload.exp || payload.exp <= Date.now() || !payload.jti) return null;
+  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const expected = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(payloadRaw)));
+  const actual = base64UrlDecode(signatureRaw);
+  if (expected.length !== actual.length) return null;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i += 1) diff |= expected[i] ^ actual[i];
+  if (diff !== 0) return null;
+  return createSession(env, "token", `signed:${payload.jti}`);
+}
+
 async function requireSession(request: Request, env: Env): Promise<Session | null> {
   const header = request.headers.get("authorization") || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
@@ -295,7 +318,7 @@ async function handleAuthToken(request: Request, env: Env) {
   const body = await readJson<{ token?: string }>(request);
   const rawToken = body.token?.trim();
   if (!rawToken) return json({ error: "missing_token" }, { status: 400 });
-  const session = await authWithToken(rawToken, env);
+  const session = (await authWithToken(rawToken, env)) || (await verifySignedInviteToken(rawToken, env));
   if (!session) return json({ error: "invalid_token" }, { status: 401 });
   return json(session);
 }
