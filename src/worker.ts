@@ -153,7 +153,7 @@ function appHtml(): string {
 
   <main class="chat-area">
     <header class="chat-header">
-      <span class="brand">cv.haegele.dev</span>
+      <h1 class="brand">CV Workspace</h1>
       <span id="budgetBadge" class="budget-badge">—</span>
       <button id="startOverBtn" class="secondary sm">Start over</button>
     </header>
@@ -162,6 +162,14 @@ function appHtml(): string {
       <textarea id="chatInput" class="chat-input" placeholder="Type a message…" rows="1"></textarea>
       <button id="sendBtn" class="send-btn">&#9654;</button>
     </div>
+    <footer class="app-footer">
+      <span class="footer-privacy">Your files are stored in Cloudflare D1 for 30&nbsp;days and deleted automatically. Generated documents are never stored server-side.</span>
+      <span class="footer-links">
+        <a href="https://haegele.dev" target="_blank" rel="noopener">haegele.dev</a>
+        &middot;
+        <a href="https://github.com/karma-works/cv-haegele-dev" target="_blank" rel="noopener">GitHub</a>
+      </span>
+    </footer>
   </main>
 </div>
 
@@ -220,9 +228,15 @@ button,input,textarea,select{font:inherit}
 .chat-area{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
 .chat-header{display:flex;align-items:center;gap:12px;padding:12px 16px;
   border-bottom:1px solid var(--rule);flex-shrink:0}
-.brand{font-size:14px;color:var(--ink-soft);flex:1}
+.brand{font-size:16px;font-weight:500;flex:1;letter-spacing:-.01em}
 .budget-badge{font-size:12px;color:var(--ink-soft);border:1px solid var(--rule);
   padding:2px 8px;white-space:nowrap}
+.app-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:8px 16px;border-top:1px solid var(--rule);flex-shrink:0;flex-wrap:wrap}
+.footer-privacy{font-size:11px;color:var(--ink-soft);flex:1}
+.footer-links{font-size:11px;color:var(--ink-soft);white-space:nowrap}
+.footer-links a{color:var(--ink-soft);text-decoration:none}
+.footer-links a:hover{text-decoration:underline}
 .messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
 
 /* Bubbles */
