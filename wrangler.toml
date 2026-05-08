@@ -33,7 +33,7 @@ script_name = "cv-haegele-dev"
 APP_ORIGIN = "https://cv.haegele.dev"
 MODEL_NAME = "@cf/moonshotai/kimi-k2.6"
 KB_MAX_BYTES = "1048576"
-DAILY_TOKEN_BUDGET = "500000"
+DAILY_TOKEN_BUDGET = "1000000"
 
 [[rules]]
 type = "Text"
