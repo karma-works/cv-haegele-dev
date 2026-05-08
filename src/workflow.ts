@@ -1,3 +1,4 @@
+import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { Env, getKnowledge, kbPrompt, recordTokenUsage } from "./shared";
 import { generateTailoringPlan, generateCv, generateCoverLetter } from "./tools";
 
