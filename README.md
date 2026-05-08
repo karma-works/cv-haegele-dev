@@ -1,4 +1,4 @@
-# cv.haegele.dev
+![CV Workspace](docs/logo.svg)
 
 AI-assisted CV and cover letter tailoring workspace on Cloudflare Workers.
 
