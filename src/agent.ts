@@ -2,7 +2,7 @@ import {
   Env, AiMessage, KnowledgeFile,
   getKnowledge, kbPrompt, checkTokenBudget, recordTokenUsage,
   ensureWorkspace, sanitizeUserText, extractText, extractTokens,
-  randomId,
+  randomId, callAiMarkdown,
 } from "./shared";
 import {
   fetchJdTool, analyzeGapsTool, searchCompanyTool, importProfileTool,
@@ -71,6 +71,9 @@ To call a tool, output a fenced code block with language "tool" containing JSON 
 \`\`\`
 \`\`\`tool
 {"name": "start_generation", "type": "generate_cover_letter", "tone": "direct and concise"}
+\`\`\`
+\`\`\`tool
+{"name": "shorten_cover_letter"}
 \`\`\`
 
 After a tool call you will receive the result and should continue.
@@ -163,9 +166,11 @@ export class CvAgent implements DurableObject {
       const contentType = body.tool === "generate_cv" ? "cv"
         : body.tool === "generate_cover_letter" ? "cover_letter" : "plan";
 
-      // Save plan to state if it's a tailoring plan
+      // Save result to state
       if (body.tool === "create_tailoring_plan") {
         await this.state.storage.put("tailoring_plan", body.result);
+      } else if (body.tool === "generate_cover_letter") {
+        await this.state.storage.put("cover_letter", body.result);
       }
 
       await this.state.storage.put("pending_workflow_id", "");
@@ -179,7 +184,12 @@ export class CvAgent implements DurableObject {
         type: "agent",
         text: `Your ${label} is ready! You can preview and download it above.\n\nWould you like anything else?`,
       };
-      const choices: WsEvent = { type: "choices", options: ["Generate cover letter", "Refine the tailoring plan", "Start over"] };
+      const choiceOptions = body.tool === "generate_cover_letter"
+        ? ["Make it half the length", "Generate another version", "Start over"]
+        : body.tool === "generate_cv"
+        ? ["Generate cover letter", "Refine the tailoring plan", "Start over"]
+        : ["Generate CV", "Generate cover letter", "Start over"];
+      const choices: WsEvent = { type: "choices", options: choiceOptions };
 
       // Store completion message in display history
       const history = await this.getDisplayHistory();
@@ -426,6 +436,24 @@ export class CvAgent implements DurableObject {
 
       } else if (tool === "start_generation") {
         result = await this.startGeneration(args.type as WorkflowTool, args, history);
+
+      } else if (tool === "shorten_cover_letter") {
+        const existing = await this.state.storage.get<string>("cover_letter") || "";
+        if (!existing) { result = "No cover letter found to shorten."; }
+        else {
+          const shortened = await callAiMarkdown(
+            this.env,
+            `You are an expert editor. Rewrite the cover letter at exactly half the length.
+Keep only the most impactful sentences. Be razor-sharp and direct.
+No filler, no generic phrases. Every sentence must earn its place.
+Preserve the original language (English or German).`,
+            `Cover letter to shorten:\n\n${existing}`
+          );
+          await this.state.storage.put("cover_letter", shortened);
+          const previewEvent: WsEvent = { type: "preview", content_type: "cover_letter", content: shortened };
+          for (const ws2 of this.state.getWebSockets()) this.send(ws2, previewEvent);
+          result = "Cover letter shortened successfully.";
+        }
 
       } else {
         result = `Unknown tool: ${tool}`;
