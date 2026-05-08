@@ -50,34 +50,38 @@ const SYSTEM_PROMPT_TEMPLATE = `You are a professional CV tailoring assistant. G
 4. Analysing skill gaps
 5. Creating a tailoring plan, generating the CV, and optionally a cover letter
 
-Available tools — call exactly one per response when needed:
-TOOL_CALL: fetch_jd
-{"url": "https://..."}
-
-TOOL_CALL: analyze_gaps
-{}
-
-TOOL_CALL: search_company
-{"query": "company name or URL"}
-
-TOOL_CALL: import_profile
-{"url": "https://github.com/username"}
-
-TOOL_CALL: start_generation
-{"type": "create_tailoring_plan"}
-or
-TOOL_CALL: start_generation
-{"type": "generate_cv", "tailoringPlan": "optional — if already created"}
-or
-TOOL_CALL: start_generation
-{"type": "generate_cover_letter", "tone": "direct and concise"}
+To call a tool, output a fenced code block with language "tool" containing JSON — exactly one per response:
+\`\`\`tool
+{"name": "fetch_jd", "url": "https://..."}
+\`\`\`
+\`\`\`tool
+{"name": "analyze_gaps"}
+\`\`\`
+\`\`\`tool
+{"name": "search_company", "query": "company name or URL"}
+\`\`\`
+\`\`\`tool
+{"name": "import_profile", "url": "https://github.com/username"}
+\`\`\`
+\`\`\`tool
+{"name": "start_generation", "type": "create_tailoring_plan"}
+\`\`\`
+\`\`\`tool
+{"name": "start_generation", "type": "generate_cv"}
+\`\`\`
+\`\`\`tool
+{"name": "start_generation", "type": "generate_cover_letter", "tone": "direct and concise"}
+\`\`\`
 
 After a tool call you will receive the result and should continue.
 
-To offer the user choices at the end of your message, add a line:
-CHOICES: ["Option A", "Option B", "Option C"]
+To offer the user clickable choices at the end of your message, output a fenced code block with language "choices":
+\`\`\`choices
+["Option A", "Option B", "Option C"]
+\`\`\`
 
-Guidelines:
+Rules:
+- The tool and choices code blocks are machine-read — output them literally, never translate or paraphrase them.
 - Infer CV language from the JD language (German JD → German CV, English JD → English CV)
 - When KB is empty, prompt for uploads or profile URLs
 - After receiving a JD, proactively offer to search the company
@@ -97,14 +101,18 @@ To get started:
 
 Once your knowledge base is ready, I'll help you tailor your CV for any job.
 
-CHOICES: ["Upload files now", "Share a profile URL", "I already have files — let's proceed"]`;
+\`\`\`choices
+["Upload files now", "Share a profile URL", "I already have files — let's proceed"]
+\`\`\``;
 
 const GREETING_WITH_KB = (count: number) =>
   `Hello! I can see you have ${count} file${count !== 1 ? "s" : ""} in your knowledge base.
 
 Please provide the job description you'd like to tailor your CV for.
 
-CHOICES: ["Upload JD document", "Provide JD URL", "Paste the JD as text"]`;
+\`\`\`choices
+["Upload JD document", "Provide JD URL", "Paste the JD as text"]
+\`\`\``;
 
 export class CvAgent implements DurableObject {
   private state: DurableObjectState;
@@ -469,25 +477,31 @@ export class CvAgent implements DurableObject {
   }
 
   private parseToolCall(text: string): { tool: string; args: Record<string, string> } | null {
-    const m = text.match(/TOOL_CALL:\s*(\w+)\s*\n(\{[\s\S]*?\})/);
+    const m = text.match(/```tool\s*\n([\s\S]*?)\n```/);
     if (!m) return null;
-    try { return { tool: m[1].trim(), args: JSON.parse(m[2]) as Record<string, string> }; } catch { return null; }
+    try {
+      const obj = JSON.parse(m[1].trim()) as Record<string, string>;
+      const tool = obj.name;
+      if (!tool) return null;
+      const { name: _name, ...args } = obj;
+      return { tool, args };
+    } catch { return null; }
   }
 
   private stripToolCall(text: string): string {
-    return text.replace(/TOOL_CALL:\s*\w+\s*\n\{[\s\S]*?\}/g, "").trim();
+    return text.replace(/```tool\s*\n[\s\S]*?\n```/g, "").trim();
   }
 
   private parseChoices(text: string): string[] | null {
-    const m = text.match(/CHOICES:\s*(\[[\s\S]*?\])/);
+    const m = text.match(/```choices\s*\n([\s\S]*?)\n```/);
     if (!m) return null;
-    try { return JSON.parse(m[1]) as string[]; } catch { return null; }
+    try { return JSON.parse(m[1].trim()) as string[]; } catch { return null; }
   }
 
   private stripMeta(text: string): string {
     return text
-      .replace(/TOOL_CALL:\s*\w+\s*\n\{[\s\S]*?\}/g, "")
-      .replace(/CHOICES:\s*\[[\s\S]*?\]/g, "")
+      .replace(/```tool\s*\n[\s\S]*?\n```/g, "")
+      .replace(/```choices\s*\n[\s\S]*?\n```/g, "")
       .trim();
   }
 
