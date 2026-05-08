@@ -4,20 +4,31 @@ AI-assisted CV and cover letter tailoring workspace on Cloudflare Workers.
 
 Live demo: [cv.haegele.dev](https://cv.haegele.dev)
 
-![CV tailoring workspace screenshot](docs/cv-tailoring-workspace-screenshot.png)
+## How it works
+
+A single chat window where the AI agent leads you through the CV tailoring process:
+
+1. **Build your knowledge base** — upload Markdown files or import a GitHub/LinkedIn/Xing profile via URL
+2. **Provide the job description** — upload a `.md`/`.txt` file or paste a URL; the agent fetches and stores it
+3. **Company research** — the agent searches the company site for hiring signals and AI usage policy
+4. **Gap analysis** — identifies skills to emphasise or fill
+5. **Tailoring plan → CV → Cover letter** — heavy generation runs as Cloudflare Workflows (up to 4 min per step); results stream back to your browser
+
+The collapsible sidebar manages your knowledge base files. Outputs are rendered as Markdown and downloadable.
 
 ## Features
 
-- Cloudflare D1 knowledge-base storage with 30-day retention.
-- Immediate server-side deletion for removed files and "delete all data".
-- Markdown knowledge-base uploads, max 1 MB per workspace.
-- Allowlisted public profile import for GitHub, LinkedIn, Xing, and x.com.
-- GitHub import includes profile metadata, public repositories, and README excerpts.
-- Arbitrary HTTPS company/careers URL fetch with basic SSRF protections and stored summary.
-- Workers AI-backed gap analysis, tailoring plan, Markdown CV, and Markdown cover letter generation.
-- Streaming AI responses over SSE so generated documents appear live.
-- Toast UI Editor Markdown rendering for clarifications, CVs, and cover letters.
-- Generated CVs and cover letters are session-only and downloaded as Markdown.
+- Chat-first UI with clickable choice chips guiding each step
+- Cloudflare Durable Objects for per-workspace session state (WebSocket hibernation)
+- Cloudflare Workflows for long-running AI generation (retries, memoised steps)
+- Cloudflare D1 knowledge-base storage with 30-day retention
+- Immediate server-side deletion for removed files and "delete all data"
+- Markdown knowledge-base uploads, max 1 MB per workspace
+- Allowlisted public profile import: GitHub (with README excerpts), LinkedIn, Xing, X
+- Company AI usage policy detection; defaults to [Anthropic candidate AI guidance](https://www.anthropic.com/candidate-ai-guidance)
+- CV language auto-detected from the job description (English/German)
+- Daily token budget enforced via D1 counter
+- Marked.js for Markdown rendering; no external UI framework
 
 ## Local Development
 
@@ -40,25 +51,11 @@ Required services:
 - Cloudflare Workers
 - Cloudflare D1
 - Workers AI
+- Cloudflare Durable Objects
+- Cloudflare Workflows
 - A Cloudflare-managed zone for the custom domain
 
-`wrangler.toml` configures:
-
-```toml
-routes = [
-  { pattern = "cv.haegele.dev", custom_domain = true }
-]
-
-[[d1_databases]]
-binding = "DB"
-database_name = "recruiting-haegele-dev"
-database_id = "332a9525-1d29-44b9-9ead-2568e67acdc8"
-
-[ai]
-binding = "AI"
-```
-
-The hosted deployment uses `cv_`-prefixed tables in the existing `recruiting-haegele-dev` D1 database. The deploy workflow resolves that database, applies `src/db/schema.sql`, and deploys the Worker. For a fully separate self-hosted installation, create your own D1 database and update `wrangler.toml` plus the workflow database names.
+`wrangler.toml` configures all bindings. For a self-hosted installation, create your own D1 database and update `wrangler.toml`.
 
 ## GitHub Actions Secrets
 
@@ -92,7 +89,7 @@ npm run smoke
 
 ## Privacy Model
 
-This app stores uploaded knowledge-base files in Cloudflare D1 for 30 days. Removing a file deletes it immediately. The "Delete all data" action deletes the full workspace knowledge base and fetched company sources immediately. Generated CVs and cover letters are not persisted by the app.
+Uploaded knowledge-base files are stored in Cloudflare D1 for 30 days. Removing a file deletes it immediately. "Delete all data" deletes the full workspace knowledge base immediately. Generated CVs and cover letters are not persisted server-side; they are rendered in-browser and downloaded as Markdown.
 
 ## License
 

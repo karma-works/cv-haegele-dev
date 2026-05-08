@@ -15,6 +15,20 @@ database_id = "332a9525-1d29-44b9-9ead-2568e67acdc8"
 [ai]
 binding = "AI"
 
+[[durable_objects.bindings]]
+name = "CV_AGENT"
+class_name = "CvAgent"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["CvAgent"]
+
+[[workflows]]
+name = "cv-workflow"
+binding = "CV_WORKFLOW"
+class_name = "CvWorkflow"
+script_name = "cv-haegele-dev"
+
 [vars]
 APP_ORIGIN = "https://cv.haegele.dev"
 MODEL_NAME = "@cf/moonshotai/kimi-k2.6"
