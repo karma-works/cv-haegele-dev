@@ -4,6 +4,8 @@ AI-assisted CV and cover letter tailoring workspace on Cloudflare Workers.
 
 Live demo: [cv.haegele.dev](https://cv.haegele.dev)
 
+![CV Workspace screenshot](docs/CV%20tailoring%20workspace.png)
+
 ## How it works
 
 A single chat window where the AI agent leads you through the CV tailoring process:
